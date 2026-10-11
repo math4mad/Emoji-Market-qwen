@@ -42,6 +42,44 @@ def delete_snapshot(name):
     if os.path.exists(p):
         os.remove(p)
 
+# --- 术语表（来自设计对话，供使用者理解模拟器行为） ---
+GLOSSARY = [
+    ("汇率 (Exchange Rate)",
+     "两种商品之间的兑换比率，就是图上每条边上的数字。例如 Sheep→Wool = 5，表示 1 只羊换 5 单位毛线。"),
+    ("基准汇率 (Base Rate)",
+     "每条边的初始汇率。危机后汇率会向基准回归；热力图的「偏离基准」模式就是拿当前汇率与它比较。"),
+    ("周期汇率 (Cycle Rate)",
+     "沿一个套利环（如 Sheep→Wool→Wheat→Iron→Wine→Sheep）把各边汇率连乘。乘积 > 1 意味着绕一圈能赚钱——这就是套利机会。"),
+    ("套利 (Arbitrage)",
+     "利用汇率差低买高卖：沿周期汇率 > 1 的环交易一圈，资本随之增长。"),
+    ("权重与最短路径 (Weight / Dijkstra)",
+     "算法把汇率取负对数（weight = −log rate）当边成本，连乘化为连加，再用 Dijkstra 找成本最低的兑换链。"),
+    ("滑点 / 市场冲击 (Slippage / Impact)",
+     "交易本身会扰动市场：每笔交易让边上的汇率移动 amount × 0.0001——交易越大，越难按原价成交。"),
+    ("危机 (Crisis)",
+     "随机事件：某条边的汇率瞬间腰斩。发生概率由侧边栏「危机概率」控制。"),
+    ("市场恢复 (Recovery)",
+     "危机后汇率向基准回归的速度。恢复速度越大，市场越早回到均衡。"),
+    ("死锁 (Deadlock)",
+     "汇率暴跌时 −log(rate) 爆炸、路径成本过高，Agent 找不到可行路径，资本就永远卡在某个值（如 482）不动。"),
+    ("降级搜索 (Fallback Search)",
+     "最优路径不满足利润阈值时自动尝试次优路径，避免死锁。"),
+    ("资本 (Capital)",
+     "每个 Agent 持有的财富量，主图曲线展示的就是它的演化。"),
+    ("风险偏好 (Risk Preference)",
+     "0 = 保守（只在明显有利时出手），1 = 激进（机会稍现就交易）。"),
+    ("交易量占比 (Volume Fraction)",
+     "每个 tick 投入交易的资本比例。占比越高，单笔对市场的冲击越大。"),
+    ("利润阈值 (Profit Threshold)",
+     "触发套利的周期汇率下限，例如 1.05 表示「绕一圈至少赚 5% 才出手」。"),
+    ("热力图 (Heatmap)",
+     "5×5 矩阵可视化：行 = 卖出商品、列 = 买入商品，可切换汇率 / 交易量 / 偏离基准三种模式。"),
+    ("偏离基准 (Deviation)",
+     "log(当前汇率 / 基准汇率)：正 = 高于基准，负 = 低于基准，危机时一眼可见。"),
+    ("回测快照 (Backtest Snapshot)",
+     "把一次运行的资本曲线存到 runs/ 目录，之后可叠加比较不同参数下的演化路径。"),
+]
+
 # --- 核心引擎类 (与之前相同，但增加了状态记录) ---
 class DynamicMarket:
     def __init__(self):
@@ -263,6 +301,13 @@ with st.sidebar:
                     "tick", "logs", "crisis_marks", "initialized"]:
             st.session_state.pop(key, None)
         st.rerun()
+
+    st.markdown("---")
+    # 术语表：来自设计对话，供使用者理解模拟器行为
+    with st.expander("📖 术语表 · Glossary", expanded=False):
+        st.caption("设计对话中出现的概念，速查。")
+        for _term, _desc in GLOSSARY:
+            st.markdown(f"**{_term}** — {_desc}")
 
 # 主界面布局
 col1, col2 = st.columns([2, 1])
