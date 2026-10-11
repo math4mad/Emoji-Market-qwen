@@ -74,8 +74,16 @@ class SimulationEngine:
                 for i in range(len(path)-1):
                     rate *= self.market.G[path[i]][path[i+1]]['rate']
                     
-                if rate > st.session_state.get('profit_threshold', 1.05):
-                    final_rate = self.market.execute_trade(path, agent.capital)
+                # 完整套利周期：兑换到 Wine 后，再通过 Wine->comm 边换回本金商品
+                if self.market.G.has_edge("Wine", agent.comm):
+                    cycle_rate = rate * self.market.G["Wine"][agent.comm]['rate']
+                    full_path = list(path) + [agent.comm]
+                else:
+                    cycle_rate = rate
+                    full_path = list(path)
+
+                if cycle_rate > st.session_state.get('profit_threshold', 1.05):
+                    final_rate = self.market.execute_trade(full_path, agent.capital)
                     agent.capital *= final_rate
                     events.append(f"🤖 {agent.name} 套利 | 资本: {agent.capital:.1f}")
             except nx.NetworkXNoPath:
@@ -87,6 +95,10 @@ class SimulationEngine:
         for agent in self.agents:
             st.session_state.capital_history[agent.name].append(agent.capital)
             
+        # 每步追加状态事件，保证日志和曲线都能看到演化
+        status = " | ".join(f"{a.name}: {a.capital:.1f}" for a in self.agents)
+        tick = len(st.session_state.capital_history[self.agents[0].name]) - 1
+        events.append(f"📊 Tick {tick} | {status}")
         return events
 
 # --- Streamlit UI ---
