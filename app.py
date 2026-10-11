@@ -16,7 +16,8 @@ class DynamicMarket:
         self.G.add_node(name, emoji=emoji)
         
     def add_exchange_rate(self, base, target, rate, loc="Global"):
-        weight = -math.log(rate) if rate > 0 else float('inf')
+        safe_rate = max(rate, 1e-10)
+        weight = min(-math.log(safe_rate), 20.0)
         self.G.add_edge(base, target, weight=weight, rate=rate, loc=loc, volume=0)
         self.base_rates[(base, target)] = rate
 
@@ -25,27 +26,28 @@ class DynamicMarket:
         for i in range(len(path) - 1):
             u, v = path[i], path[i+1]
             edge_data = self.G[u][v]
-            impact = amount * 0.0001 # 保持比例稳定
+            impact = amount * 0.0001
             new_rate = max(edge_data['rate'] * (1 - impact), 0.01)
             edge_data['rate'] = new_rate
             edge_data['volume'] += amount
-            edge_data['weight'] = -math.log(new_rate)
+            edge_data['weight'] = min(-math.log(max(new_rate, 1e-10)), 20.0)
             total_rate *= new_rate
         return total_rate
 
     def market_recovery(self, recovery_rate=0.1):
         for u, v, data in self.G.edges(data=True):
             base = self.base_rates.get((u, v))
-            if base and abs(data['rate'] - base) > 0.001:
+            if base and abs(data['rate'] - base) > 1e-9:
                 diff = base - data['rate']
                 data['rate'] += diff * recovery_rate
-                data['weight'] = -math.log(data['rate'])
+                data['weight'] = min(-math.log(max(data['rate'], 1e-10)), 20.0)
 
 class Agent:
-    def __init__(self, name, comm, capital):
+    def __init__(self, name, comm, capital, target="Wine"):
         self.name = name
         self.comm = comm
         self.capital = capital
+        self.target = target
 
 class SimulationEngine:
     def __init__(self, market, agents):
@@ -66,28 +68,43 @@ class SimulationEngine:
                 self.market.G[u][v]['weight'] = -math.log(self.market.G[u][v]['rate'])
                 events.append(f"⚠️ CRISIS: {u}->{v} 汇率腰斩!")
                 
-        # AI 行动
+        # AI 行动：基于交易前汇率评估，统一执行
+        # 评估用交易前汇率，收益也按交易前汇率计算（交易影响只作用于市场）
+        targets = st.session_state.get('agent_targets', {})
+        planned = []
         for agent in self.agents:
+            agent.target = targets.get(agent.name, agent.target)
             try:
-                path = nx.shortest_path(self.market.G, agent.comm, "Wine", weight='weight')
+                path = nx.shortest_path(self.market.G, agent.comm, agent.target, weight='weight')
                 rate = 1.0
                 for i in range(len(path)-1):
                     rate *= self.market.G[path[i]][path[i+1]]['rate']
-                    
-                # 完整套利周期：兑换到 Wine 后，再通过 Wine->comm 边换回本金商品
-                if self.market.G.has_edge("Wine", agent.comm):
-                    cycle_rate = rate * self.market.G["Wine"][agent.comm]['rate']
+
+                # 完整套利周期：兑换到目标商品后，再通过 target->comm 边换回本金商品
+                if self.market.G.has_edge(agent.target, agent.comm):
+                    cycle_rate = rate * self.market.G[agent.target][agent.comm]['rate']
                     full_path = list(path) + [agent.comm]
                 else:
                     cycle_rate = rate
                     full_path = list(path)
 
                 if cycle_rate > st.session_state.get('profit_threshold', 1.05):
-                    final_rate = self.market.execute_trade(full_path, agent.capital)
-                    agent.capital *= final_rate
-                    events.append(f"🤖 {agent.name} 套利 | 资本: {agent.capital:.1f}")
+                    planned.append((agent, full_path, cycle_rate))
             except nx.NetworkXNoPath:
                 pass
+
+        # 统一执行：收益按交易前汇率计算，市场汇率按 impact 更新
+        for agent, full_path, cycle_rate in planned:
+            self.market.execute_trade(full_path, agent.capital)
+            agent.capital *= cycle_rate
+            events.append(f"🤖 {agent.name} 套利({agent.comm}→{agent.target}) | 资本: {agent.capital:.1f}")
+                
+        # 危机可视化：记录危机发生的 tick 和受影响的边
+        if any('CRISIS' in e for e in events):
+            crisis_info = [(e.split(': ')[1].split(' ')[0]) for e in events if 'CRISIS' in e]
+            st.session_state.setdefault('crisis_marks', []).append(
+                (len(st.session_state.capital_history[self.agents[0].name]), crisis_info)
+            )
                 
         self.market.market_recovery(st.session_state.get('recovery_rate', 0.1))
         
@@ -117,8 +134,8 @@ if 'initialized' not in st.session_state:
     market.add_exchange_rate("Wine", "Sheep", 10, "Port")
     
     agents = [
-        Agent(name="Alpha-Bot", comm="Sheep", capital=100),
-        Agent(name="Beta-Bot", comm="Sheep", capital=100)
+        Agent(name="Alpha-Bot", comm="Sheep", capital=100, target="Wine"),
+        Agent(name="Beta-Bot", comm="Sheep", capital=100, target="Wine")
     ]
     
     engine = SimulationEngine(market, agents)
@@ -131,6 +148,7 @@ if 'initialized' not in st.session_state:
     st.session_state.tick = 0
     st.session_state.logs = []
     st.session_state.initialized = True
+    st.session_state.crisis_marks = []
 
 # 侧边栏控制
 with st.sidebar:
@@ -139,6 +157,14 @@ with st.sidebar:
     st.session_state.profit_threshold = st.slider("AI 利润阈值", 1.0, 1.2, 1.05, 0.01)
     st.session_state.recovery_rate = st.slider("市场恢复速度", 0.01, 0.3, 0.1, 0.01)
     sim_speed = st.slider("模拟速度 (秒/步)", 0.1, 2.0, 0.5, 0.1)
+    # Agent 目标商品选择
+    st.markdown("---")
+    st.markdown("**🤖 Agent 配置**")
+    commodity_choices = ["Sheep", "Wool", "Wheat", "Iron", "Wine"]
+    st.session_state.agent_targets = {
+        "Alpha-Bot": st.selectbox("Alpha-Bot 目标商品", commodity_choices, index=4),
+        "Beta-Bot": st.selectbox("Beta-Bot 目标商品", commodity_choices, index=4),
+    }
     
     if st.button("🔄 重置模拟"):
         for key in list(st.session_state.keys()):
@@ -155,6 +181,10 @@ with col1:
     history = st.session_state.capital_history
     for name, caps in history.items():
         ax.plot(caps, label=name, linewidth=2)
+    # 危机标记：在危机发生的 tick 处画垂直虚线
+    for tick_num, edges in st.session_state.get('crisis_marks', []):
+        if tick_num < len(list(history.values())[0]):
+            ax.axvline(x=tick_num, color='red', linestyle='--', alpha=0.5, linewidth=1)
     ax.set_xlabel("Time Step")
     ax.set_ylabel("Capital (🍷)")
     ax.legend(loc='upper left')
