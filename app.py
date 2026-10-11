@@ -80,6 +80,54 @@ GLOSSARY = [
      "把一次运行的资本曲线存到 runs/ 目录，之后可叠加比较不同参数下的演化路径。"),
 ]
 
+# --- 系统智能仪表盘：市场 ↔ 智能同构的类脑指标（源自设计对话） ---
+def compute_intelligence_metrics(market, current_tick):
+    G = market.G
+    metrics = {}
+
+    # 1. 整合信息量 (Φ)：移除每个节点后全局可达点对的衰减率
+    #    （简化版 Φ：越高 = 系统越不可分解、牵一发而动全身）
+    if nx.number_of_nodes(G) > 1:
+        base_reach = sum(len(paths) for _, paths in nx.all_pairs_shortest_path(G))
+        after = []
+        for node in list(G.nodes()):
+            G_copy = G.copy()
+            G_copy.remove_node(node)
+            after.append(sum(len(paths) for _, paths in nx.all_pairs_shortest_path(G_copy)))
+        avg_reach = float(np.mean(after))
+        metrics["phi"] = round(1.0 - avg_reach / max(base_reach, 1), 3)
+    else:
+        metrics["phi"] = 0.0
+
+    # 2. 认知负荷：平均交换链长度（按跳数，归一化 0–10）
+    #    注：weight 是 -log(rate)，负权会让 Dijkstra 时对时错，故按跳数计
+    try:
+        avg_path = nx.average_shortest_path_length(G)
+    except nx.NetworkXError:
+        avg_path = None
+    metrics["cognitive_load"] = (
+        round(min(float(avg_path) / 5.0, 10.0), 2) if avg_path is not None else None
+    )
+
+    # 3. 学习速率：距最近一次危机的 tick 数（恢复越快越高）
+    marks = st.session_state.get("crisis_marks", [])
+    if marks and current_tick > marks[-1][0]:
+        ticks_since = current_tick - marks[-1][0]
+        metrics["learning_rate"] = round(10.0 / max(ticks_since, 1), 2)
+    else:
+        metrics["learning_rate"] = None
+
+    # 4. 表征效率：中介商品承载的交易量占比（越高 = 中介体系越成熟）
+    mediator_nodes = {"Wool", "Wheat", "Iron"}
+    total_vol = sum(d["volume"] for _, _, d in G.edges(data=True))
+    mediator_vol = sum(
+        d["volume"] for u, v, d in G.edges(data=True)
+        if u in mediator_nodes or v in mediator_nodes
+    )
+    metrics["repr_efficiency"] = round(mediator_vol / max(total_vol, 1), 3)
+
+    return metrics
+
 # --- 核心引擎类 (与之前相同，但增加了状态记录) ---
 class DynamicMarket:
     def __init__(self):
@@ -201,6 +249,13 @@ class SimulationEngine:
         status = " | ".join(f"{a.name}: {a.capital:.1f}" for a in self.agents)
         tick = len(st.session_state.capital_history[self.agents[0].name]) - 1
         events.append(f"📊 Tick {tick} | {status}")
+
+        # 记录系统智能指标（仪表盘趋势图用；None 记为 NaN 便于画图）
+        m = compute_intelligence_metrics(self.market, tick)
+        st.session_state.setdefault("metrics_history", []).append(
+            {"tick": tick,
+             **{k: float("nan") if v is None else float(v) for k, v in m.items()}}
+        )
         return events
 
 # --- Streamlit UI ---
@@ -236,6 +291,7 @@ if 'initialized' not in st.session_state:
     st.session_state.logs = []
     st.session_state.initialized = True
     st.session_state.crisis_marks = []
+    st.session_state.metrics_history = []
 
 # 侧边栏控制
 with st.sidebar:
@@ -298,7 +354,7 @@ with st.sidebar:
             save_snapshot(snap)
         # 只清空模拟状态，保留 Agent 配置（初始资本才能在重置后生效）
         for key in ["market", "agents", "engine", "capital_history",
-                    "tick", "logs", "crisis_marks", "initialized"]:
+                    "tick", "logs", "crisis_marks", "initialized", "metrics_history"]:
             st.session_state.pop(key, None)
         st.rerun()
 
@@ -335,6 +391,41 @@ with col2:
     with log_container:
         for log in reversed(st.session_state.logs[-20:]):
             st.text(log)
+
+# --- 系统智能仪表盘（市场 ↔ 智能同构，源自设计对话） ---
+st.markdown("---")
+st.subheader("🧠 系统智能仪表盘")
+st.caption("把经济体当神经系统看 —— 四个类脑指标")
+m_now = compute_intelligence_metrics(st.session_state.market, st.session_state.tick)
+metric_cols = st.columns(4)
+with metric_cols[0]:
+    st.metric("整合信息量 (Φ)", m_now["phi"],
+              help="移除任一节点后全局可达点对的衰减率。越高 = 系统越不可分解、牵一发而动全身")
+with metric_cols[1]:
+    cl = m_now["cognitive_load"]
+    st.metric("认知负荷", "N/A" if cl is None else cl,
+              help="平均交换链长度（归一化 0–10）。过高 = 正常路径中断、被迫绕远路")
+with metric_cols[2]:
+    lr = m_now["learning_rate"]
+    st.metric("学习速率", "N/A" if lr is None else lr,
+              help="距最近一次危机的 tick 数倒数。越高 = 危机后恢复越快")
+with metric_cols[3]:
+    st.metric("表征效率", f"{m_now['repr_efficiency']:.1%}",
+              help="经过中介商品（Wool/Wheat/Iron）的交易量占比。越高 = 中介体系越成熟")
+
+with st.expander("📖 如何解读这四个指标", expanded=False):
+    st.markdown(
+        "- **健康市场**：Φ ≈ 0.6–0.8 · 认知负荷 ≈ 2–4 · 学习速率 > 2 · 表征效率 > 60%\n"
+        "- **危机中的市场**：Φ 骤降 · 认知负荷飙升至 8+ · 学习速率 < 0.5 · 表征效率 < 30%\n"
+        "- **过热的市场**：Φ ≈ 0.95（完全连接但脆弱）· 认知负荷 > 7 · 表征效率 > 90%（过度金融化）"
+    )
+
+if st.checkbox("📊 显示智能指标历史趋势", key="show_metrics_trend"):
+    hist = st.session_state.get("metrics_history", [])
+    if len(hist) < 2:
+        st.caption("暂无足够数据 — 多跑几个 tick 后再来")
+    else:
+        st.line_chart(pd.DataFrame(hist).astype(float), x="tick")
 
 # --- 汇率/交易量热力图（改进点 3） ---
 st.markdown("---")
