@@ -6,3 +6,10 @@
 4. 样式要统一， 有现代感。 
 5. Desktop 样式优先。 
 6. 根据对话， 添加教程，显示交换是怎么完成的
+
+
+
+-----
+fellow this pic to form a new dashboard layout
+
+/Users/mac/Downloads/DownLoad_Temp/OIP-C.6chp0Ei_doHBOO660mka-wHaEJ.webp

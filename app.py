@@ -318,42 +318,53 @@ TUTORIAL_STEPS = [
 # --- Streamlit UI ---
 st.set_page_config(page_title="Emoji Economy Simulator", layout="wide", page_icon="🌍")
 
-# --- Modern CSS (point 4: unified modern styling) ---
+# --- Dashboard CSS (web analytics style) ---
 st.markdown("""
 <style>
-/* 全局字体 */
-.stApp { font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif; }
+.stApp { font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
 
-/* 面板卡片样式 */
-.stBlock, .stContainer { border-radius: 12px; }
-
-/* 标题层级 */
-h1 { font-size: 1.8rem; font-weight: 700; }
-h2, h3 { font-size: 1.2rem; font-weight: 600; }
-
-/* metric 卡片 */
+/* Metric KPI cards */
 [data-testid="stMetric"] {
-    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-    border-radius: 10px;
-    padding: 16px 12px;
-    border: 1px solid #dee2e6;
+    background: #fff;
+    border-radius: 12px;
+    padding: 16px 14px;
+    border: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+[data-testid="stMetric"] label {
+    font-size: 0.75rem !important;
+    color: #6c757d !important;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+    color: #1a1a2e;
 }
 
-/* 按钮 */
+/* Chart panels */
+.stContainer:has(> [data-testid="stVerticalBlockBorderWrapper"]) {
+    border-radius: 12px;
+}
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    border-radius: 12px;
+    border: 1px solid #e9ecef !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    background: #fff;
+}
+
+/* Buttons */
 .stButton > button { border-radius: 8px; font-weight: 500; }
 
-/* 侧边栏 */
+/* Sidebar */
 section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #f8f9fa 0%, #ffffff 100%);
+    background: linear-gradient(180deg, #ffffff 0%, #f8f9fa 100%);
 }
 
-/* 浮动控制球（point 1: 悬浮球按钮） */
-.float-ball-wrapper {
-    position: fixed;
-    bottom: 24px;
-    right: 24px;
-    z-index: 999;
-}
+/* Headers */
+h1, h2, h3 { font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -523,20 +534,22 @@ with st.sidebar:
             st.markdown(f"**{_term}** — {_desc}")
 
 # ============================================================
-# HEADER BAR — Title + run controls (point 3: dashboard layout)
+# HEADER BAR — Analytics dashboard style
 # ============================================================
-header_col1, header_col2, header_col3 = st.columns([6, 1, 1])
-with header_col1:
-    st.markdown("## 🌍 Emoji 政治经济学模拟器")
+hdr_l, hdr_r = st.columns([8, 2])
+with hdr_l:
+    st.markdown("## 🌍 Emoji Economy Analytics")
     st.caption(f"Tick **{st.session_state.tick}** | "
-               f"危机 {st.session_state.crisis_prob:.0%} | "
-               f"阈值 {st.session_state.profit_threshold:.2f} | "
-               f"恢复 {st.session_state.recovery_rate:.2f} | "
-               f"税率 {st.session_state.get('trading_tax', 0):.0%}")
-with header_col2:
-    auto_run = st.toggle("▶️ 自动", value=False)
-with header_col3:
-    step_clicked = st.button("⏭️ 步进", use_container_width=True)
+               f"Crisis {st.session_state.crisis_prob:.0%} | "
+               f"Threshold {st.session_state.profit_threshold:.2f} | "
+               f"Recovery {st.session_state.recovery_rate:.2f} | "
+               f"Tax {st.session_state.get('trading_tax', 0):.0%}")
+with hdr_r:
+    run_c1, run_c2 = st.columns(2)
+    with run_c1:
+        auto_run = st.toggle("▶️ Auto", value=False)
+    with run_c2:
+        step_clicked = st.button("⏭️ Step", width="stretch")
 
 # --- Run logic ---
 if auto_run:
@@ -554,72 +567,133 @@ elif step_clicked:
     st.rerun()
 
 # ============================================================
-# ROW 1 — Capital chart + Event log (point 2: smaller, in one panel)
+# KPI ROW — 5 colored metric cards (analytics dashboard style)
 # ============================================================
-row1_left, row1_right = st.columns([3, 1])
+_history = st.session_state.capital_history
+_agents_now = st.session_state.agents
+_total_cap = sum(a.capital for a in _agents_now)
+_active_cycles = sum(1 for a in _agents_now if a.capital > 10)
+_crisis_count = len(st.session_state.get("crisis_marks", []))
+_total_trades = sum(d["volume"] for _, _, d in st.session_state.market.G.edges(data=True))
 
-with row1_left:
+kpi_cols = st.columns(5)
+_kpis = [
+    ("💰 Total Capital", f"{_total_cap:,.1f}", "#4f46e5"),
+    ("🤖 Active Agents", f"{_active_cycles}", "#0ea5e9"),
+    ("⚠️ Crises", f"{_crisis_count}", "#ef4444"),
+    ("📊 Total Volume", f"{_total_trades:,.0f}", "#f59e0b"),
+    ("⏱️ Tick", f"{st.session_state.tick}", "#10b981"),
+]
+for col, (label, val, color) in zip(kpi_cols, _kpis):
+    with col:
+        st.markdown(
+            f"""<div style="background:{color};border-radius:12px;padding:16px 14px;color:white;
+            box-shadow:0 2px 8px rgba(0,0,0,0.12);">
+            <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.85;">{label}</div>
+            <div style="font-size:1.5rem;font-weight:700;margin-top:4px;">{val}</div>
+            </div>""", unsafe_allow_html=True
+        )
+
+st.markdown("")  # spacer
+
+# ============================================================
+# CHART GRID ROW 1 — Capital history + Capital by agent + Intelligence metrics
+# ============================================================
+r1_c1, r1_c2, r1_c3 = st.columns([2, 1, 1])
+
+# --- Chart: Capital Evolution (main, like "Recent Daily Traffic") ---
+with r1_c1:
     with st.container(border=True):
-        st.markdown("##### 📈 资本演化")
-        fig, ax = plt.subplots(figsize=(8, 3.5))
+        st.markdown("##### 📈 Capital Evolution")
+        fig, ax = plt.subplots(figsize=(7, 3))
         history = st.session_state.capital_history
         for name, caps in history.items():
             ax.plot(caps, label=name, linewidth=2)
         for tick_num, edges in st.session_state.get('crisis_marks', []):
             if tick_num < len(list(history.values())[0]):
-                ax.axvline(x=tick_num, color='red', linestyle='--', alpha=0.5, linewidth=1)
-        ax.set_xlabel("Tick", fontsize=9)
-        ax.set_ylabel("Capital", fontsize=9)
-        ax.legend(loc='upper left', fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.tick_params(labelsize=8)
-        st.pyplot(fig, width="stretch")
+                ax.axvline(x=tick_num, color='red', linestyle='--', alpha=0.4, linewidth=1)
+        ax.set_xlabel("Tick", fontsize=8)
+        ax.set_ylabel("Capital", fontsize=8)
+        ax.legend(loc='upper left', fontsize=7)
+        ax.grid(True, alpha=0.2)
+        ax.tick_params(labelsize=7)
+        ax.set_facecolor('#fafbfc')
+        fig.patch.set_facecolor('white')
+        st.pyplot(fig)
 
-with row1_right:
-    with st.container(border=True, height=280):
-        st.markdown("##### 📜 日志")
-        for log in reversed(st.session_state.logs[-15:]):
-            st.text(log)
+# --- Chart: Capital distribution donut (like "Device category") ---
+with r1_c2:
+    with st.container(border=True):
+        st.markdown("##### 🍩 Capital Share")
+        labels = [a.name for a in _agents_now]
+        sizes = [max(a.capital, 0.01) for a in _agents_now]
+        colors_donut = ['#4f46e5', '#0ea5e9', '#f59e0b', '#10b981', '#ef4444']
+        fig_d, ax_d = plt.subplots(figsize=(3.5, 3))
+        wedges, texts, autotexts = ax_d.pie(
+            sizes, labels=labels, autopct='%1.0f%%', startangle=90,
+            colors=colors_donut[:len(labels)],
+            wedgeprops=dict(width=0.45, edgecolor='white', linewidth=2),
+            textprops={'fontsize': 7},
+        )
+        for at in autotexts:
+            at.set_fontsize(7)
+            at.set_color('white')
+            at.set_fontweight('bold')
+        ax_d.set_facecolor('white')
+        fig_d.patch.set_facecolor('white')
+        st.pyplot(fig_d)
 
-# ============================================================
-# ROW 2 — Intelligence metrics (4 metric cards, compact)
-# ============================================================
-with st.container(border=True):
-    st.markdown("##### 🧠 系统智能仪表盘")
-    m_now = compute_intelligence_metrics(st.session_state.market, st.session_state.tick)
-    mc = st.columns(4)
-    with mc[0]:
-        st.metric("Φ 整合信息量", m_now["phi"],
-                  help="移除任一节点后全局可达点对的衰减率")
-    with mc[1]:
+# --- Intelligence metrics (compact vertical) ---
+with r1_c3:
+    with st.container(border=True):
+        st.markdown("##### 🧠 Intelligence")
+        m_now = compute_intelligence_metrics(st.session_state.market, st.session_state.tick)
         cl = m_now["cognitive_load"]
-        st.metric("认知负荷", "—" if cl is None else cl,
-                  help="平均交换链长度（归一化 0–10）")
-    with mc[2]:
         lr = m_now["learning_rate"]
-        st.metric("学习速率", "—" if lr is None else lr,
-                  help="距最近一次危机的 tick 数倒数")
-    with mc[3]:
-        st.metric("表征效率", f"{m_now['repr_efficiency']:.1%}",
-                  help="中介商品交易量占比")
+        st.metric("Φ Integration", m_now["phi"])
+        st.metric("Cognitive Load", "—" if cl is None else cl)
+        st.metric("Learning Rate", "—" if lr is None else lr)
+        st.metric("Repr. Efficiency", f"{m_now['repr_efficiency']:.1%}")
 
-    show_trend = st.checkbox("显示历史趋势", key="show_metrics_trend")
-    if show_trend:
+# ============================================================
+# CHART GRID ROW 2 — Metrics trend + Heatmap + Edge table
+# ============================================================
+r2_c1, r2_c2 = st.columns([3, 2])
+
+# --- Chart: Intelligence metrics trend (like "Traffic by Channels" stacked) ---
+with r2_c1:
+    with st.container(border=True):
+        st.markdown("##### 🧠 Metrics Trend")
         hist = st.session_state.get("metrics_history", [])
         if len(hist) < 2:
-            st.caption("暂无足够数据")
+            st.caption("Run more steps to see trend…")
         else:
-            st.line_chart(pd.DataFrame(hist).astype(float), x="tick", height=180)
+            st.line_chart(pd.DataFrame(hist).astype(float), x="tick", height=200)
 
-# ============================================================
-# ROW 3 — Heatmap + Edge table (point 2: compact side-by-side)
-# ============================================================
-row3_left, row3_right = st.columns([3, 2])
-
-with row3_left:
+# --- Edge state table ---
+with r2_c2:
     with st.container(border=True):
-        st.markdown("##### 🔥 市场热力图")
-        heat_mode = st.radio("指标", ["汇率 rate", "交易量 volume", "偏离基准 deviation"],
+        st.markdown("##### 🔁 Edge State")
+        rows = []
+        for u, v, data in st.session_state.market.G.edges(data=True):
+            base = st.session_state.market.base_rates.get((u, v), data['rate'])
+            rows.append({
+                "Edge": f"{st.session_state.market.G.nodes[u]['emoji']} {u}→{v}",
+                "Rate": round(data['rate'], 4),
+                "Dev%": round((data['rate'] / base - 1) * 100, 1),
+                "Vol": round(data['volume'], 1),
+            })
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+# ============================================================
+# CHART GRID ROW 3 — Heatmap + Event log
+# ============================================================
+r3_c1, r3_c2 = st.columns([3, 1])
+
+with r3_c1:
+    with st.container(border=True):
+        st.markdown("##### 🔥 Market Heatmap")
+        heat_mode = st.radio("Mode", ["Rate", "Volume", "Deviation"],
                              horizontal=True, key="heat_mode")
         market = st.session_state.market
         commodities = list(market.G.nodes())
@@ -627,9 +701,9 @@ with row3_left:
         idx = {c: i for i, c in enumerate(commodities)}
         matrix = np.full((n, n), np.nan)
         for u, v, data in market.G.edges(data=True):
-            if heat_mode.startswith("汇率"):
+            if heat_mode == "Rate":
                 val = data['rate']
-            elif heat_mode.startswith("交易量"):
+            elif heat_mode == "Volume":
                 val = data['volume'] if data['volume'] > 0 else np.nan
             else:
                 base = market.base_rates.get((u, v))
@@ -637,9 +711,9 @@ with row3_left:
             matrix[idx[u], idx[v]] = val
         masked = np.ma.masked_invalid(matrix)
         finite = matrix[np.isfinite(matrix)]
-        fig_h, ax_h = plt.subplots(figsize=(5.5, 4.5))
+        fig_h, ax_h = plt.subplots(figsize=(5.5, 4))
         if len(finite):
-            if heat_mode.startswith("偏离"):
+            if heat_mode == "Deviation":
                 m = max(abs(finite.min()), abs(finite.max()), 0.05)
                 norm = mcolors.TwoSlopeNorm(vmin=-m, vcenter=0.0, vmax=m)
                 cmap = "RdBu_r"
@@ -653,41 +727,32 @@ with row3_left:
                 for j in range(n):
                     val = matrix[i, j]
                     if np.isnan(val):
-                        ax_h.text(j, i, "—", ha="center", va="center", color="lightgray", fontsize=9)
+                        ax_h.text(j, i, "—", ha="center", va="center", color="lightgray", fontsize=8)
                     else:
-                        if heat_mode.startswith("汇率"): txt = f"{val:.2f}"
-                        elif heat_mode.startswith("交易量"): txt = f"{val:,.0f}"
+                        if heat_mode == "Rate": txt = f"{val:.2f}"
+                        elif heat_mode == "Volume": txt = f"{val:,.0f}"
                         else: txt = f"{val:+.2f}"
                         norm_range = norm.vmax - norm.vmin
                         frac = (val - norm.vmin) / norm_range if norm_range > 0 else 0.5
                         color = "white" if frac > 0.55 else "black"
-                        ax_h.text(j, i, txt, ha="center", va="center", color=color, fontsize=9, fontweight="bold")
+                        ax_h.text(j, i, txt, ha="center", va="center", color=color, fontsize=8, fontweight="bold")
             fig_h.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04,
-                           label="rate" if heat_mode.startswith("汇率")
-                           else ("volume" if heat_mode.startswith("交易量") else "log(rate/base)"))
+                           label=heat_mode.lower())
         else:
-            st.caption("暂无数据")
-        labels = commodities
-        ax_h.set_xticks(range(n), labels, fontsize=8)
-        ax_h.set_yticks(range(n), labels, fontsize=8)
-        ax_h.set_xlabel("buy (to)", fontsize=9)
-        ax_h.set_ylabel("sell (from)", fontsize=9)
-        ax_h.set_title("row = sell, col = buy", fontsize=9)
-        st.pyplot(fig_h, width="stretch")
+            ax_h.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_h.transAxes)
+        ax_h.set_xticks(range(n), commodities, fontsize=8)
+        ax_h.set_yticks(range(n), commodities, fontsize=8)
+        ax_h.set_xlabel("buy (to)", fontsize=8)
+        ax_h.set_ylabel("sell (from)", fontsize=8)
+        ax_h.set_facecolor('#fafbfc')
+        fig_h.patch.set_facecolor('white')
+        st.pyplot(fig_h)
 
-with row3_right:
-    with st.container(border=True):
-        st.markdown("##### 🔁 边状态")
-        rows = []
-        for u, v, data in st.session_state.market.G.edges(data=True):
-            base = st.session_state.market.base_rates.get((u, v), data['rate'])
-            rows.append({
-                "边": f"{st.session_state.market.G.nodes[u]['emoji']} {u}→{v}",
-                "汇率": round(data['rate'], 4),
-                "偏离%": round((data['rate'] / base - 1) * 100, 1),
-                "量": round(data['volume'], 1),
-            })
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+with r3_c2:
+    with st.container(border=True, height=300):
+        st.markdown("##### 📜 Event Log")
+        for log in reversed(st.session_state.logs[-12:]):
+            st.text(log)
 
 # ============================================================
 # ROW 4 — Snapshots + Export + Sharing (compact)
@@ -719,7 +784,7 @@ with st.container(border=True):
             ax.legend(loc="upper left", fontsize=7, ncol=2)
             ax.grid(True, alpha=0.3)
             ax.tick_params(labelsize=8)
-            st.pyplot(fig, width="stretch")
+            st.pyplot(fig)
 
     with snap_row2:
         # CSV exports
@@ -729,14 +794,12 @@ with st.container(border=True):
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             st.download_button("📥 资本CSV", data=csv_data,
-                               file_name=f"capital_tick{st.session_state.tick}.csv", mime="text/csv",
-                               width="stretch")
+                               file_name=f"capital_tick{st.session_state.tick}.csv", mime="text/csv")
         with dl_col2:
             if st.session_state.get("metrics_history"):
                 metrics_csv = pd.DataFrame(st.session_state.metrics_history).to_csv(index=False).encode("utf-8")
                 st.download_button("📥 指标CSV", data=metrics_csv,
-                                   file_name=f"metrics_tick{st.session_state.tick}.csv", mime="text/csv",
-                                   width="stretch")
+                                   file_name=f"metrics_tick{st.session_state.tick}.csv", mime="text/csv")
 
         # Scenario sharing
         st.markdown("**🔗 场景共享**")
