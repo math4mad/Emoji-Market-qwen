@@ -34,3 +34,4 @@ npx playwright screenshot --browser chromium \
 | # | File | Description |
 |---|------|-------------|
 | 01 | `01-concave-layout-v1.png` | Concave-style: dark status bar + mid row (Capital/Edge/Intelligence) + lower row (Heatmap/Log) + bottom action strip |
+| 02 | `02-compact-heatmap-log.png` | Compact heatmap (3.2x2.8) and slim event log (8 lines, h=250) — heatmap narrower, log taller |

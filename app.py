@@ -640,7 +640,7 @@ with m3:
 # ============================================================
 # LOWER ROW — Market Heatmap | Event Log
 # ============================================================
-l1, l2 = st.columns([3, 2])
+l1, l2 = st.columns([2, 3])
 
 with l1:
     with st.container(border=True):
@@ -663,7 +663,7 @@ with l1:
             matrix[idx[u], idx[v]] = val
         masked = np.ma.masked_invalid(matrix)
         finite = matrix[np.isfinite(matrix)]
-        fig_h, ax_h = plt.subplots(figsize=(5, 3.5))
+        fig_h, ax_h = plt.subplots(figsize=(3.2, 2.8))
         if len(finite):
             if heat_mode == "Deviation":
                 m = max(abs(finite.min()), abs(finite.max()), 0.05)
@@ -679,7 +679,7 @@ with l1:
                 for j in range(n):
                     val = matrix[i, j]
                     if np.isnan(val):
-                        ax_h.text(j, i, "—", ha="center", va="center", color="lightgray", fontsize=8)
+                        ax_h.text(j, i, "—", ha="center", va="center", color="lightgray", fontsize=7)
                     else:
                         if heat_mode == "Rate": txt = f"{val:.2f}"
                         elif heat_mode == "Volume": txt = f"{val:,.0f}"
@@ -687,20 +687,20 @@ with l1:
                         norm_range = norm.vmax - norm.vmin
                         frac = (val - norm.vmin) / norm_range if norm_range > 0 else 0.5
                         color = "white" if frac > 0.55 else "black"
-                        ax_h.text(j, i, txt, ha="center", va="center", color=color, fontsize=8, fontweight="bold")
+                        ax_h.text(j, i, txt, ha="center", va="center", color=color, fontsize=7, fontweight="bold")
             fig_h.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04, label=heat_mode.lower())
         else:
             ax_h.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_h.transAxes)
-        ax_h.set_xticks(range(n), commodities, fontsize=8)
-        ax_h.set_yticks(range(n), commodities, fontsize=8)
+        ax_h.set_xticks(range(n), commodities, fontsize=7)
+        ax_h.set_yticks(range(n), commodities, fontsize=7)
         ax_h.set_facecolor('#fafbfc')
         fig_h.patch.set_facecolor('white')
         st.pyplot(fig_h)
 
 with l2:
-    with st.container(border=True, height=380):
+    with st.container(border=True, height=250):
         st.markdown("##### 📜 Event Log")
-        for log in reversed(st.session_state.logs[-15:]):
+        for log in reversed(st.session_state.logs[-8:]):
             st.text(log)
 
 # ============================================================
