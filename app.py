@@ -318,36 +318,12 @@ TUTORIAL_STEPS = [
 # --- Streamlit UI ---
 st.set_page_config(page_title="Emoji Economy Simulator", layout="wide", page_icon="🌍")
 
-# --- Dashboard CSS (web analytics style) ---
+# --- Dashboard CSS (concave-style control panel + main area) ---
 st.markdown("""
 <style>
 .stApp { font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
 
-/* Metric KPI cards */
-[data-testid="stMetric"] {
-    background: #fff;
-    border-radius: 12px;
-    padding: 16px 14px;
-    border: none;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-}
-[data-testid="stMetric"] label {
-    font-size: 0.75rem !important;
-    color: #6c757d !important;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-[data-testid="stMetric"] [data-testid="stMetricValue"] {
-    font-size: 1.5rem !important;
-    font-weight: 700 !important;
-    color: #1a1a2e;
-}
-
-/* Chart panels */
-.stContainer:has(> [data-testid="stVerticalBlockBorderWrapper"]) {
-    border-radius: 12px;
-}
+/* All bordered containers share a unified panel look */
 div[data-testid="stVerticalBlockBorderWrapper"] {
     border-radius: 12px;
     border: 1px solid #e9ecef !important;
@@ -358,13 +334,38 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
 /* Buttons */
 .stButton > button { border-radius: 8px; font-weight: 500; }
 
-/* Sidebar */
+/* Control panel (sidebar) — wider, more prominent */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #ffffff 0%, #f8f9fa 100%);
+    border-right: 1px solid #e9ecef;
 }
+section[data-testid="stSidebar"] .stMarkdown h2 { color: #4f46e5; }
 
-/* Headers */
-h1, h2, h3 { font-weight: 700; }
+/* Top status bar */
+.status-bar {
+    background: #1a1a2e;
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 10px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+.status-bar .lbl { opacity: 0.6; font-size: 0.7rem; text-transform: uppercase; }
+.status-bar .val { font-weight: 700; }
+
+/* Action button area (bottom strip) */
+.action-area {
+    background: #fff;
+    border: 1px solid #e9ecef;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-top: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -534,22 +535,35 @@ with st.sidebar:
             st.markdown(f"**{_term}** — {_desc}")
 
 # ============================================================
-# HEADER BAR — Analytics dashboard style
+# HEADER BAR — Title + run controls (concave-style: status strip + menu)
 # ============================================================
-hdr_l, hdr_r = st.columns([8, 2])
-with hdr_l:
-    st.markdown("## 🌍 Emoji Economy Analytics")
-    st.caption(f"Tick **{st.session_state.tick}** | "
-               f"Crisis {st.session_state.crisis_prob:.0%} | "
-               f"Threshold {st.session_state.profit_threshold:.2f} | "
-               f"Recovery {st.session_state.recovery_rate:.2f} | "
-               f"Tax {st.session_state.get('trading_tax', 0):.0%}")
-with hdr_r:
-    run_c1, run_c2 = st.columns(2)
-    with run_c1:
-        auto_run = st.toggle("▶️ Auto", value=False)
-    with run_c2:
-        step_clicked = st.button("⏭️ Step", width="stretch")
+# Run logic — must be before the status bar (toggles in sidebar set these)
+# ============================================================
+_agents_now = st.session_state.agents
+_total_cap = sum(a.capital for a in _agents_now)
+_active_cycles = sum(1 for a in _agents_now if a.capital > 10)
+_crisis_count = len(st.session_state.get("crisis_marks", []))
+_total_trades = sum(d["volume"] for _, _, d in st.session_state.market.G.edges(data=True))
+
+# Top status bar (full width, dark)
+st.markdown(f"""
+<div class="status-bar">
+  <span><span class="lbl">Tick</span> <span class="val">{st.session_state.tick}</span></span>
+  <span><span class="lbl">Crisis</span> <span class="val">{st.session_state.crisis_prob:.0%}</span></span>
+  <span><span class="lbl">Threshold</span> <span class="val">{st.session_state.profit_threshold:.2f}</span></span>
+  <span><span class="lbl">Recovery</span> <span class="val">{st.session_state.recovery_rate:.2f}</span></span>
+  <span><span class="lbl">Tax</span> <span class="val">{st.session_state.get('trading_tax', 0):.0%}</span></span>
+  <span style="margin-left:auto"><span class="lbl">Total</span> <span class="val">{_total_cap:,.1f}</span></span>
+  <span><span class="lbl">Crises</span> <span class="val">{_crisis_count}</span></span>
+  <span><span class="lbl">Volume</span> <span class="val">{_total_trades:,.0f}</span></span>
+</div>
+""", unsafe_allow_html=True)
+
+# Top right small box: run controls
+run_col1, run_col2 = st.columns([6, 1])
+with run_col2:
+    auto_run = st.toggle("▶ Auto", value=False, key="auto_run")
+    step_clicked = st.button("⏭ Step", width="stretch", key="step_btn")
 
 # --- Run logic ---
 if auto_run:
@@ -566,46 +580,17 @@ elif step_clicked:
     st.session_state.logs.extend([f"[Tick {st.session_state.tick}] {e}" for e in events])
     st.rerun()
 
-# ============================================================
-# KPI ROW — 5 colored metric cards (analytics dashboard style)
-# ============================================================
-_history = st.session_state.capital_history
-_agents_now = st.session_state.agents
-_total_cap = sum(a.capital for a in _agents_now)
-_active_cycles = sum(1 for a in _agents_now if a.capital > 10)
-_crisis_count = len(st.session_state.get("crisis_marks", []))
-_total_trades = sum(d["volume"] for _, _, d in st.session_state.market.G.edges(data=True))
-
-kpi_cols = st.columns(5)
-_kpis = [
-    ("💰 Total Capital", f"{_total_cap:,.1f}", "#4f46e5"),
-    ("🤖 Active Agents", f"{_active_cycles}", "#0ea5e9"),
-    ("⚠️ Crises", f"{_crisis_count}", "#ef4444"),
-    ("📊 Total Volume", f"{_total_trades:,.0f}", "#f59e0b"),
-    ("⏱️ Tick", f"{st.session_state.tick}", "#10b981"),
-]
-for col, (label, val, color) in zip(kpi_cols, _kpis):
-    with col:
-        st.markdown(
-            f"""<div style="background:{color};border-radius:12px;padding:16px 14px;color:white;
-            box-shadow:0 2px 8px rgba(0,0,0,0.12);">
-            <div style="font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;opacity:0.85;">{label}</div>
-            <div style="font-size:1.5rem;font-weight:700;margin-top:4px;">{val}</div>
-            </div>""", unsafe_allow_html=True
-        )
-
 st.markdown("")  # spacer
 
 # ============================================================
-# CHART GRID ROW 1 — Capital history + Capital by agent + Intelligence metrics
+# MID ROW — Capital Evolution | Edge State | Intelligence
 # ============================================================
-r1_c1, r1_c2, r1_c3 = st.columns([2, 1, 1])
+m1, m2, m3 = st.columns([2, 2, 1])
 
-# --- Chart: Capital Evolution (main, like "Recent Daily Traffic") ---
-with r1_c1:
+with m1:
     with st.container(border=True):
         st.markdown("##### 📈 Capital Evolution")
-        fig, ax = plt.subplots(figsize=(7, 3))
+        fig, ax = plt.subplots(figsize=(6, 2.8))
         history = st.session_state.capital_history
         for name, caps in history.items():
             ax.plot(caps, label=name, linewidth=2)
@@ -621,57 +606,7 @@ with r1_c1:
         fig.patch.set_facecolor('white')
         st.pyplot(fig)
 
-# --- Chart: Capital distribution donut (like "Device category") ---
-with r1_c2:
-    with st.container(border=True):
-        st.markdown("##### 🍩 Capital Share")
-        labels = [a.name for a in _agents_now]
-        sizes = [max(a.capital, 0.01) for a in _agents_now]
-        colors_donut = ['#4f46e5', '#0ea5e9', '#f59e0b', '#10b981', '#ef4444']
-        fig_d, ax_d = plt.subplots(figsize=(3.5, 3))
-        wedges, texts, autotexts = ax_d.pie(
-            sizes, labels=labels, autopct='%1.0f%%', startangle=90,
-            colors=colors_donut[:len(labels)],
-            wedgeprops=dict(width=0.45, edgecolor='white', linewidth=2),
-            textprops={'fontsize': 7},
-        )
-        for at in autotexts:
-            at.set_fontsize(7)
-            at.set_color('white')
-            at.set_fontweight('bold')
-        ax_d.set_facecolor('white')
-        fig_d.patch.set_facecolor('white')
-        st.pyplot(fig_d)
-
-# --- Intelligence metrics (compact vertical) ---
-with r1_c3:
-    with st.container(border=True):
-        st.markdown("##### 🧠 Intelligence")
-        m_now = compute_intelligence_metrics(st.session_state.market, st.session_state.tick)
-        cl = m_now["cognitive_load"]
-        lr = m_now["learning_rate"]
-        st.metric("Φ Integration", m_now["phi"])
-        st.metric("Cognitive Load", "—" if cl is None else cl)
-        st.metric("Learning Rate", "—" if lr is None else lr)
-        st.metric("Repr. Efficiency", f"{m_now['repr_efficiency']:.1%}")
-
-# ============================================================
-# CHART GRID ROW 2 — Metrics trend + Heatmap + Edge table
-# ============================================================
-r2_c1, r2_c2 = st.columns([3, 2])
-
-# --- Chart: Intelligence metrics trend (like "Traffic by Channels" stacked) ---
-with r2_c1:
-    with st.container(border=True):
-        st.markdown("##### 🧠 Metrics Trend")
-        hist = st.session_state.get("metrics_history", [])
-        if len(hist) < 2:
-            st.caption("Run more steps to see trend…")
-        else:
-            st.line_chart(pd.DataFrame(hist).astype(float), x="tick", height=200)
-
-# --- Edge state table ---
-with r2_c2:
+with m2:
     with st.container(border=True):
         st.markdown("##### 🔁 Edge State")
         rows = []
@@ -684,13 +619,30 @@ with r2_c2:
                 "Vol": round(data['volume'], 1),
             })
         st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.markdown("**🧠 Metrics Trend**")
+        hist = st.session_state.get("metrics_history", [])
+        if len(hist) < 2:
+            st.caption("Run more steps…")
+        else:
+            st.line_chart(pd.DataFrame(hist).astype(float), x="tick", height=120)
+
+with m3:
+    with st.container(border=True):
+        st.markdown("##### 🧠 Intelligence")
+        m_now = compute_intelligence_metrics(st.session_state.market, st.session_state.tick)
+        cl = m_now["cognitive_load"]
+        lr = m_now["learning_rate"]
+        st.metric("Φ Integration", m_now["phi"])
+        st.metric("Cognitive Load", "—" if cl is None else cl)
+        st.metric("Learning Rate", "—" if lr is None else lr)
+        st.metric("Repr. Efficiency", f"{m_now['repr_efficiency']:.1%}")
 
 # ============================================================
-# CHART GRID ROW 3 — Heatmap + Event log
+# LOWER ROW — Market Heatmap | Event Log
 # ============================================================
-r3_c1, r3_c2 = st.columns([3, 1])
+l1, l2 = st.columns([3, 2])
 
-with r3_c1:
+with l1:
     with st.container(border=True):
         st.markdown("##### 🔥 Market Heatmap")
         heat_mode = st.radio("Mode", ["Rate", "Volume", "Deviation"],
@@ -711,7 +663,7 @@ with r3_c1:
             matrix[idx[u], idx[v]] = val
         masked = np.ma.masked_invalid(matrix)
         finite = matrix[np.isfinite(matrix)]
-        fig_h, ax_h = plt.subplots(figsize=(5.5, 4))
+        fig_h, ax_h = plt.subplots(figsize=(5, 3.5))
         if len(finite):
             if heat_mode == "Deviation":
                 m = max(abs(finite.min()), abs(finite.max()), 0.05)
@@ -736,100 +688,92 @@ with r3_c1:
                         frac = (val - norm.vmin) / norm_range if norm_range > 0 else 0.5
                         color = "white" if frac > 0.55 else "black"
                         ax_h.text(j, i, txt, ha="center", va="center", color=color, fontsize=8, fontweight="bold")
-            fig_h.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04,
-                           label=heat_mode.lower())
+            fig_h.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04, label=heat_mode.lower())
         else:
             ax_h.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax_h.transAxes)
         ax_h.set_xticks(range(n), commodities, fontsize=8)
         ax_h.set_yticks(range(n), commodities, fontsize=8)
-        ax_h.set_xlabel("buy (to)", fontsize=8)
-        ax_h.set_ylabel("sell (from)", fontsize=8)
         ax_h.set_facecolor('#fafbfc')
         fig_h.patch.set_facecolor('white')
         st.pyplot(fig_h)
 
-with r3_c2:
-    with st.container(border=True, height=300):
+with l2:
+    with st.container(border=True, height=380):
         st.markdown("##### 📜 Event Log")
-        for log in reversed(st.session_state.logs[-12:]):
+        for log in reversed(st.session_state.logs[-15:]):
             st.text(log)
 
 # ============================================================
-# ROW 4 — Snapshots + Export + Sharing (compact)
+# ACTION BUTTON AREA (bottom strip) — Snapshots, Exports, Sharing
 # ============================================================
-with st.container(border=True):
-    st.markdown("##### 🕘 回测 & 📤 导出")
-    snap_row1, snap_row2 = st.columns([3, 2])
+st.markdown('<div class="action-area">', unsafe_allow_html=True)
+act_c1, act_c2, act_c3 = st.columns(3)
 
+with act_c1:
+    st.markdown("**🕘 Snapshots**")
     snapshots = load_snapshots()
-    with snap_row1:
-        if not snapshots:
-            st.caption("暂无快照 — 点击侧边栏 📸 按钮")
-        else:
-            log_y = st.checkbox("Y轴对数", value=False, key="snap_logy")
-            fig, ax = plt.subplots(figsize=(7, 3))
-            colors = plt.cm.tab10.colors
-            agent_names = list(snapshots[0]["history"].keys())
-            linestyles = ["-", "--", "-.", ":"]
-            for i, snap in enumerate(snapshots):
-                c = colors[i % len(colors)]
-                for j, aname in enumerate(agent_names):
-                    caps = snap["history"].get(aname)
-                    if caps:
-                        ax.plot(caps, color=c, linestyle=linestyles[j % len(linestyles)],
-                                linewidth=2, label=f"{snap['name']}·{aname}")
-            ax.set_xlabel("Tick", fontsize=9)
-            ax.set_ylabel("Capital", fontsize=9)
-            if log_y: ax.set_yscale("log")
-            ax.legend(loc="upper left", fontsize=7, ncol=2)
-            ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
-            st.pyplot(fig)
-
-    with snap_row2:
-        # CSV exports
-        hist_df = pd.DataFrame(st.session_state.capital_history)
-        hist_df.index.name = "tick"
-        csv_data = hist_df.to_csv().encode("utf-8")
-        dl_col1, dl_col2 = st.columns(2)
-        with dl_col1:
-            st.download_button("📥 资本CSV", data=csv_data,
-                               file_name=f"capital_tick{st.session_state.tick}.csv", mime="text/csv")
-        with dl_col2:
-            if st.session_state.get("metrics_history"):
-                metrics_csv = pd.DataFrame(st.session_state.metrics_history).to_csv(index=False).encode("utf-8")
-                st.download_button("📥 指标CSV", data=metrics_csv,
-                                   file_name=f"metrics_tick{st.session_state.tick}.csv", mime="text/csv")
-
-        # Scenario sharing
-        st.markdown("**🔗 场景共享**")
-        params = {
-            "crisis_prob": st.session_state.crisis_prob,
-            "profit_threshold": st.session_state.profit_threshold,
-            "recovery_rate": st.session_state.recovery_rate,
-            "trading_tax": st.session_state.get("trading_tax", 0.0),
-        }
-        encoded = urllib.parse.urlencode({k: str(v) for k, v in params.items()})
-        st.code(f"?{encoded}", language="text")
-
-        # URL load
-        query_params = st.query_params
-        if query_params and not st.session_state.get("url_loaded", False):
-            try:
-                for k in ["crisis_prob", "profit_threshold", "recovery_rate", "trading_tax"]:
-                    if k in query_params:
-                        st.session_state[k] = float(query_params[k])
-                st.session_state.url_loaded = True
-                st.session_state.logs.append("[场景] 从 URL 加载了参数")
-            except (ValueError, TypeError):
-                pass
-
-        # Snapshot delete
+    if not snapshots:
+        st.caption("暂无快照 — 侧边栏 📸")
+    else:
+        log_y = st.checkbox("Y log", value=False, key="snap_logy")
+        fig, ax = plt.subplots(figsize=(4, 2))
+        colors = plt.cm.tab10.colors
+        agent_names = list(snapshots[0]["history"].keys())
+        linestyles = ["-", "--", "-.", ":"]
+        for i, snap in enumerate(snapshots):
+            c = colors[i % len(colors)]
+            for j, aname in enumerate(agent_names):
+                caps = snap["history"].get(aname)
+                if caps:
+                    ax.plot(caps, color=c, linestyle=linestyles[j % len(linestyles)],
+                            linewidth=1.5, label=f"{snap['name']}·{aname}")
+        if log_y: ax.set_yscale("log")
+        ax.legend(loc="upper left", fontsize=6, ncol=1)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(labelsize=6)
+        st.pyplot(fig)
         if snapshots:
-            del_name = st.selectbox("删除快照", [""] + [s["name"] for s in snapshots], key="del_snap")
-            if st.button("🗑️ 删除", disabled=not del_name, width="stretch"):
+            del_name = st.selectbox("删除", [""] + [s["name"] for s in snapshots], key="del_snap", label_visibility="collapsed")
+            if st.button("🗑️ Delete", disabled=not del_name, key="del_btn"):
                 delete_snapshot(del_name)
                 st.rerun()
+
+with act_c2:
+    st.markdown("**📤 Export**")
+    hist_df = pd.DataFrame(st.session_state.capital_history)
+    hist_df.index.name = "tick"
+    csv_data = hist_df.to_csv().encode("utf-8")
+    st.download_button("📥 Capital CSV", data=csv_data,
+                       file_name=f"capital_tick{st.session_state.tick}.csv", mime="text/csv")
+    if st.session_state.get("metrics_history"):
+        metrics_csv = pd.DataFrame(st.session_state.metrics_history).to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Metrics CSV", data=metrics_csv,
+                           file_name=f"metrics_tick{st.session_state.tick}.csv", mime="text/csv")
+
+with act_c3:
+    st.markdown("**🔗 Scenario Sharing**")
+    params = {
+        "crisis_prob": st.session_state.crisis_prob,
+        "profit_threshold": st.session_state.profit_threshold,
+        "recovery_rate": st.session_state.recovery_rate,
+        "trading_tax": st.session_state.get("trading_tax", 0.0),
+    }
+    encoded = urllib.parse.urlencode({k: str(v) for k, v in params.items()})
+    st.code(f"?{encoded}", language="text")
+
+    # URL load
+    query_params = st.query_params
+    if query_params and not st.session_state.get("url_loaded", False):
+        try:
+            for k in ["crisis_prob", "profit_threshold", "recovery_rate", "trading_tax"]:
+                if k in query_params:
+                    st.session_state[k] = float(query_params[k])
+            st.session_state.url_loaded = True
+            st.session_state.logs.append("[场景] 从 URL 加载了参数")
+        except (ValueError, TypeError):
+            pass
+
+st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================
 # TUTORIAL — How exchange works (point 6)
