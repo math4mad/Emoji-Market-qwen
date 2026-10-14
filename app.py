@@ -4,6 +4,8 @@ import math
 import random
 import json
 import os
+import base64
+import urllib.parse
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
@@ -11,6 +13,7 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 import time
+import io
 
 # --- 回测快照持久化（改进点 5） ---
 SNAPSHOT_DIR = "runs"
@@ -78,6 +81,14 @@ GLOSSARY = [
      "log(当前汇率 / 基准汇率)：正 = 高于基准，负 = 低于基准，危机时一眼可见。"),
     ("回测快照 (Backtest Snapshot)",
      "把一次运行的资本曲线存到 runs/ 目录，之后可叠加比较不同参数下的演化路径。"),
+    ("交易税 (Trading Tax)",
+     "政策沙盒工具：对每笔套利收益按比例征税。税率越高，Agent 的实际收益越低，可抑制过度投机。"),
+    ("央行干预 (Central Bank Intervention)",
+     "政策沙盒工具：定向向某个 Agent 注入或回收资本，模拟流动性调控与定向救助。"),
+    ("定向修复 (Targeted Repair)",
+     "政策沙盒工具：将某条危机受损边的汇率恢复到基准，模拟政府定向修复市场通道。"),
+    ("预设场景 (Preset Scenario)",
+     "一键加载预设参数组合：高原危机（高危机率+低恢复）、AI 战争（高激进）、稳健均衡（保守低危）。"),
 ]
 
 # --- 系统智能仪表盘：市场 ↔ 智能同构的类脑指标（源自设计对话） ---
@@ -164,6 +175,37 @@ class DynamicMarket:
                 data['rate'] += diff * recovery_rate
                 data['weight'] = min(-math.log(max(data['rate'], 1e-10)), 20.0)
 
+    # --- 政策沙盒：央行干预 ---
+    def inject_liquidity(self, agent, amount):
+        """央行定向救助：向某个 Agent 注入资本"""
+        agent.capital += amount
+
+    def drain_liquidity(self, agent, amount):
+        """央行回收流动性：从某个 Agent 扣除资本"""
+        agent.capital = max(agent.capital - amount, 0)
+
+    def set_price_ceiling(self, edge_pair, ceiling):
+        """价格上限（熔断）：限制某条边的汇率不超过 ceiling"""
+        u, v = edge_pair
+        if self.G.has_edge(u, v):
+            old_rate = self.G[u][v]['rate']
+            new_rate = min(old_rate, ceiling)
+            self.G[u][v]['rate'] = new_rate
+            self.G[u][v]['weight'] = min(-math.log(max(new_rate, 1e-10)), 20.0)
+            return old_rate != new_rate
+        return False
+
+    def reset_edge(self, edge_pair):
+        """定向修复：将某条边的汇率恢复到基准"""
+        u, v = edge_pair
+        if self.G.has_edge(u, v):
+            base = self.base_rates.get((u, v))
+            if base:
+                self.G[u][v]['rate'] = base
+                self.G[u][v]['weight'] = min(-math.log(max(base, 1e-10)), 20.0)
+                return True
+        return False
+
 class Agent:
     def __init__(self, name, comm, capital, target="Wine", risk=0.5, volume_frac=1.0):
         self.name = name
@@ -177,7 +219,6 @@ class SimulationEngine:
     def __init__(self, market, agents):
         self.market = market
         self.agents = agents
-        self.capital_history = {a.name: [a.capital] for a in agents}
         
     def step(self):
         events = []
@@ -187,9 +228,9 @@ class SimulationEngine:
             if edges:
                 crisis_edge = random.choice(edges)
                 u, v = crisis_edge
-                self.market.G[u][v]['rate'] *= 0.5
-                # 同步更新 weight
-                self.market.G[u][v]['weight'] = -math.log(self.market.G[u][v]['rate'])
+                self.market.G[u][v]['rate'] = max(self.market.G[u][v]['rate'] * 0.5, 1e-10)
+                # 同步更新 weight（同样 clamp 防止数值爆炸）
+                self.market.G[u][v]['weight'] = min(-math.log(max(self.market.G[u][v]['rate'], 1e-10)), 20.0)
                 events.append(f"⚠️ CRISIS: {u}->{v} 汇率腰斩!")
                 
         # AI 行动：基于交易前汇率评估，统一执行
@@ -223,13 +264,19 @@ class SimulationEngine:
                 pass
 
         # 统一执行：收益按交易前汇率计算，市场汇率按 impact 更新
+        # 交易税：央行对每笔套利收益征税（政策沙盒）
+        trading_tax = st.session_state.get('trading_tax', 0.0)
         for agent, full_path, cycle_rate in planned:
             trade_amount = agent.capital * agent.volume_frac
             self.market.execute_trade(full_path, trade_amount)
             # 部分仓位：只有交易的那部分资本按 cycle_rate 结算
-            agent.capital *= 1 + agent.volume_frac * (cycle_rate - 1)
+            gross_gain = agent.volume_frac * (cycle_rate - 1)
+            tax = gross_gain * trading_tax if gross_gain > 0 else 0.0
+            net_gain = gross_gain - tax
+            agent.capital *= 1 + net_gain
+            tax_msg = f" | 税: {agent.capital * tax:.1f}" if tax > 0 else ""
             events.append(
-                f"🤖 {agent.name} 套利({agent.comm}→{agent.target}) | 量: {trade_amount:.1f} | 资本: {agent.capital:.1f}"
+                f"🤖 {agent.name} 套利({agent.comm}→{agent.target}) | 量: {trade_amount:.1f} | 资本: {agent.capital:.1f}{tax_msg}"
             )
                 
         # 危机可视化：记录危机发生的 tick 和受影响的边
@@ -258,9 +305,57 @@ class SimulationEngine:
         )
         return events
 
+# --- Exchange Tutorial (point 6: show how exchange works) ---
+TUTORIAL_STEPS = [
+    ("1. 商品与汇率", "市场有 5 种商品：🐑 Sheep → 🧶 Wool → 🌾 Wheat → 🔨 Iron → 🍷 Wine → 🐑 Sheep（闭环）。每条边有一个汇率，例如 1 🐑 = 5 🧶。"),
+    ("2. 套利周期", "AI Agent 从 🐑 出发，沿 Sheep→Wool→Wheat→Iron→Wine→Sheep 绕一圈。把各边汇率连乘得到周期汇率：5×2×0.05×0.5×10 = 2.5。"),
+    ("3. 利润判定", "周期汇率 2.5 > 利润阈值 1.05 → 套利有利可图！Agent 投入资本完成一圈交易，资本增长约 150%。"),
+    ("4. 市场冲击", "交易本身会压低沿途边的汇率（滑点）。交易量越大，汇率下降越多，下一个 Agent 看到的机会就越小。"),
+    ("5. 危机与恢复", "随机危机会让某条边汇率腰斩。但市场恢复机制让汇率逐渐回归基准，Agent 在恢复后重新找到套利路径。"),
+    ("6. Dijkstra 寻路", "算法把汇率取 -log 当边权重，将「找最大乘积路径」转化为「找最小和路径」，用 Dijkstra 高效求解。"),
+]
+
 # --- Streamlit UI ---
-st.set_page_config(page_title="Emoji Economy Simulator", layout="wide")
-st.title("🌍 Emoji 政治经济学模拟器")
+st.set_page_config(page_title="Emoji Economy Simulator", layout="wide", page_icon="🌍")
+
+# --- Modern CSS (point 4: unified modern styling) ---
+st.markdown("""
+<style>
+/* 全局字体 */
+.stApp { font-family: 'Inter', -apple-system, 'Segoe UI', Roboto, sans-serif; }
+
+/* 面板卡片样式 */
+.stBlock, .stContainer { border-radius: 12px; }
+
+/* 标题层级 */
+h1 { font-size: 1.8rem; font-weight: 700; }
+h2, h3 { font-size: 1.2rem; font-weight: 600; }
+
+/* metric 卡片 */
+[data-testid="stMetric"] {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 10px;
+    padding: 16px 12px;
+    border: 1px solid #dee2e6;
+}
+
+/* 按钮 */
+.stButton > button { border-radius: 8px; font-weight: 500; }
+
+/* 侧边栏 */
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #f8f9fa 0%, #ffffff 100%);
+}
+
+/* 浮动控制球（point 1: 悬浮球按钮） */
+.float-ball-wrapper {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    z-index: 999;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # 1. 初始化所有需要的 Session State (使用 initialized 标记)
 if 'initialized' not in st.session_state:
@@ -293,23 +388,28 @@ if 'initialized' not in st.session_state:
     st.session_state.crisis_marks = []
     st.session_state.metrics_history = []
 
-# 侧边栏控制
+# ============================================================
+# SIDEBAR — All controls consolidated (point 1: floating ball)
+# ============================================================
 with st.sidebar:
-    st.header("⚙️ 模拟参数")
+    st.header("⚙️ Control Panel")
+
+    # --- Sim params ---
     st.session_state.crisis_prob = st.slider("危机概率 (%)", 0, 20, 5) / 100.0
     st.session_state.profit_threshold = st.slider("AI 利润阈值", 1.0, 1.2, 1.05, 0.01)
     st.session_state.recovery_rate = st.slider("市场恢复速度", 0.01, 0.3, 0.1, 0.01)
     sim_speed = st.slider("模拟速度 (秒/步)", 0.1, 2.0, 0.5, 0.1)
-    # Agent 策略参数化：目标商品 / 初始资本 / 风险偏好 / 交易量
+
+    # --- Agent config ---
     st.markdown("---")
     st.markdown("**🤖 Agent 配置**")
     commodity_choices = ["Sheep", "Wool", "Wheat", "Iron", "Wine"]
     st.session_state.agent_configs = {}
     for agent in st.session_state.agents:
-        with st.expander(f"{agent.name}", expanded=True):
+        with st.expander(f"{agent.name}", expanded=False):
             target = st.selectbox("目标商品", commodity_choices, index=4, key=f"target_{agent.name}")
             capital = st.number_input("初始资本", 1, 1_000_000, 100, key=f"capital_{agent.name}")
-            risk = st.slider("风险偏好 (0=保守, 1=激进)", 0.0, 1.0, 0.5, 0.05, key=f"risk_{agent.name}")
+            risk = st.slider("风险偏好", 0.0, 1.0, 0.5, 0.05, key=f"risk_{agent.name}")
             volume_frac = st.slider("交易量占比", 0.05, 1.0, 1.0, 0.05, key=f"volume_{agent.name}")
             st.session_state.agent_configs[agent.name] = {
                 "target": target,
@@ -318,28 +418,68 @@ with st.sidebar:
                 "volume_frac": volume_frac,
             }
             eff = 1 + (st.session_state.profit_threshold - 1) * (1 - 0.5 * risk)
-            st.caption(f"生效利润阈值 ≈ {eff:.3f} | 每笔市场冲击 ≈ {capital * volume_frac * 0.0001:.4f}")
+            st.caption(f"生效利润阈值 ≈ {eff:.3f} | 冲击 ≈ {capital * volume_frac * 0.0001:.4f}")
 
+    # --- Policy Sandbox ---
     st.markdown("---")
-    st.session_state.auto_snapshot = st.checkbox("重置时自动保存快照", value=False)
-    if st.button("📸 保存当前快照"):
-        snap = {
-            "name": datetime.now().strftime("run-%m%d-%H%M%S"),
-            "tick": st.session_state.tick,
-            "params": {
-                "crisis_prob": st.session_state.crisis_prob,
-                "profit_threshold": st.session_state.profit_threshold,
-                "recovery_rate": st.session_state.recovery_rate,
-                "agents": st.session_state.agent_configs,
-            },
-            "history": {k: list(v) for k, v in st.session_state.capital_history.items()},
-        }
-        save_snapshot(snap)
+    st.markdown("**🏦 政策沙盒**")
+    st.session_state.trading_tax = st.slider("交易税率 (%)", 0, 30, 0, key="trading_tax_slider") / 100.0
+    cb_agent = st.selectbox("央行操作目标", [a.name for a in st.session_state.agents], key="cb_target")
+    cb_amount = st.number_input("操作金额", 1, 100_000, 50, key="cb_amount")
+    cb_col1, cb_col2 = st.columns(2)
+    with cb_col1:
+        if st.button("💸 注入", key="cb_inject"):
+            target_agent = next(a for a in st.session_state.agents if a.name == cb_agent)
+            st.session_state.market.inject_liquidity(target_agent, cb_amount)
+            st.session_state.logs.append(f"[政策] 央行向 {cb_agent} 注入 {cb_amount} → 余额 {target_agent.capital:.1f}")
+            st.rerun()
+    with cb_col2:
+        if st.button("💵 回收", key="cb_drain"):
+            target_agent = next(a for a in st.session_state.agents if a.name == cb_agent)
+            st.session_state.market.drain_liquidity(target_agent, cb_amount)
+            st.session_state.logs.append(f"[政策] 央行从 {cb_agent} 回收 {cb_amount} → 余额 {target_agent.capital:.1f}")
+            st.rerun()
+    edge_list = [f"{u}→{v}" for u, v, _ in st.session_state.market.G.edges(data=True)]
+    if edge_list:
+        repair_edge = st.selectbox("定向修复边", edge_list, key="repair_edge_select")
+        if st.button("🔧 恢复基准", key="repair_btn"):
+            u, v = repair_edge.split("→")
+            if st.session_state.market.reset_edge((u, v)):
+                st.session_state.logs.append(f"[政策] 定向修复 {u}→{v} 已恢复基准")
+                st.rerun()
+
+    # --- Preset scenarios ---
+    st.markdown("---")
+    st.markdown("**📋 预设场景**")
+    preset = st.selectbox("一键加载", [
+        "（选择场景）", "🏔️ 高原危机", "🤖 AI 战争", "⚡ 稳健均衡",
+    ], key="preset_select")
+    if preset != "（选择场景）" and st.button("✅ 加载场景"):
+        if "高原危机" in preset:
+            st.session_state.crisis_prob = 0.15
+            st.session_state.profit_threshold = 1.08
+            st.session_state.recovery_rate = 0.03
+        elif "AI 战争" in preset:
+            st.session_state.crisis_prob = 0.05
+            st.session_state.profit_threshold = 1.02
+            st.session_state.recovery_rate = 0.2
+            for a in st.session_state.agents:
+                a.risk = 0.9; a.volume_frac = 1.0
+        elif "稳健均衡" in preset:
+            st.session_state.crisis_prob = 0.02
+            st.session_state.profit_threshold = 1.10
+            st.session_state.recovery_rate = 0.15
+            for a in st.session_state.agents:
+                a.risk = 0.2; a.volume_frac = 0.3
+        st.session_state.logs.append(f"[场景] 已加载: {preset}")
         st.rerun()
 
-    if st.button("🔄 重置模拟"):
-        # 重置前按需自动保存快照，便于回测比较
-        if st.session_state.get("auto_snapshot") and st.session_state.tick > 0:
+    # --- Snapshot & reset ---
+    st.markdown("---")
+    st.session_state.auto_snapshot = st.checkbox("重置时自动保存快照", value=False)
+    snap_btn_col1, snap_btn_col2 = st.columns(2)
+    with snap_btn_col1:
+        if st.button("📸 快照"):
             snap = {
                 "name": datetime.now().strftime("run-%m%d-%H%M%S"),
                 "tick": st.session_state.tick,
@@ -347,233 +487,58 @@ with st.sidebar:
                     "crisis_prob": st.session_state.crisis_prob,
                     "profit_threshold": st.session_state.profit_threshold,
                     "recovery_rate": st.session_state.recovery_rate,
+                    "trading_tax": st.session_state.get("trading_tax", 0.0),
                     "agents": st.session_state.agent_configs,
                 },
                 "history": {k: list(v) for k, v in st.session_state.capital_history.items()},
             }
             save_snapshot(snap)
-        # 只清空模拟状态，保留 Agent 配置（初始资本才能在重置后生效）
-        for key in ["market", "agents", "engine", "capital_history",
-                    "tick", "logs", "crisis_marks", "initialized", "metrics_history"]:
-            st.session_state.pop(key, None)
-        st.rerun()
+            st.rerun()
+    with snap_btn_col2:
+        if st.button("🔄 重置"):
+            if st.session_state.get("auto_snapshot") and st.session_state.tick > 0:
+                snap = {
+                    "name": datetime.now().strftime("run-%m%d-%H%M%S"),
+                    "tick": st.session_state.tick,
+                    "params": {
+                        "crisis_prob": st.session_state.crisis_prob,
+                        "profit_threshold": st.session_state.profit_threshold,
+                        "recovery_rate": st.session_state.recovery_rate,
+                        "trading_tax": st.session_state.get("trading_tax", 0.0),
+                        "agents": st.session_state.agent_configs,
+                    },
+                    "history": {k: list(v) for k, v in st.session_state.capital_history.items()},
+                }
+                save_snapshot(snap)
+            for key in ["market", "agents", "engine", "capital_history",
+                        "tick", "logs", "crisis_marks", "initialized", "metrics_history",
+                        "url_loaded"]:
+                st.session_state.pop(key, None)
+            st.rerun()
 
+    # --- Glossary ---
     st.markdown("---")
-    # 术语表：来自设计对话，供使用者理解模拟器行为
     with st.expander("📖 术语表 · Glossary", expanded=False):
-        st.caption("设计对话中出现的概念，速查。")
         for _term, _desc in GLOSSARY:
             st.markdown(f"**{_term}** — {_desc}")
 
-# 主界面布局
-col1, col2 = st.columns([2, 1])
+# ============================================================
+# HEADER BAR — Title + run controls (point 3: dashboard layout)
+# ============================================================
+header_col1, header_col2, header_col3 = st.columns([6, 1, 1])
+with header_col1:
+    st.markdown("## 🌍 Emoji 政治经济学模拟器")
+    st.caption(f"Tick **{st.session_state.tick}** | "
+               f"危机 {st.session_state.crisis_prob:.0%} | "
+               f"阈值 {st.session_state.profit_threshold:.2f} | "
+               f"恢复 {st.session_state.recovery_rate:.2f} | "
+               f"税率 {st.session_state.get('trading_tax', 0):.0%}")
+with header_col2:
+    auto_run = st.toggle("▶️ 自动", value=False)
+with header_col3:
+    step_clicked = st.button("⏭️ 步进", use_container_width=True)
 
-with col1:
-    st.subheader("📈 AI 资本演化曲线")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    # 从 session_state 读取持久化数据
-    history = st.session_state.capital_history
-    for name, caps in history.items():
-        ax.plot(caps, label=name, linewidth=2)
-    # 危机标记：在危机发生的 tick 处画垂直虚线
-    for tick_num, edges in st.session_state.get('crisis_marks', []):
-        if tick_num < len(list(history.values())[0]):
-            ax.axvline(x=tick_num, color='red', linestyle='--', alpha=0.5, linewidth=1)
-    ax.set_xlabel("Time Step")
-    ax.set_ylabel("Capital")
-    ax.legend(loc='upper left')
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
-
-with col2:
-    st.subheader("📜 实时事件日志")
-    log_container = st.container(height=400)
-    with log_container:
-        for log in reversed(st.session_state.logs[-20:]):
-            st.text(log)
-
-# --- 系统智能仪表盘（市场 ↔ 智能同构，源自设计对话） ---
-st.markdown("---")
-st.subheader("🧠 系统智能仪表盘")
-st.caption("把经济体当神经系统看 —— 四个类脑指标")
-m_now = compute_intelligence_metrics(st.session_state.market, st.session_state.tick)
-metric_cols = st.columns(4)
-with metric_cols[0]:
-    st.metric("整合信息量 (Φ)", m_now["phi"],
-              help="移除任一节点后全局可达点对的衰减率。越高 = 系统越不可分解、牵一发而动全身")
-with metric_cols[1]:
-    cl = m_now["cognitive_load"]
-    st.metric("认知负荷", "N/A" if cl is None else cl,
-              help="平均交换链长度（归一化 0–10）。过高 = 正常路径中断、被迫绕远路")
-with metric_cols[2]:
-    lr = m_now["learning_rate"]
-    st.metric("学习速率", "N/A" if lr is None else lr,
-              help="距最近一次危机的 tick 数倒数。越高 = 危机后恢复越快")
-with metric_cols[3]:
-    st.metric("表征效率", f"{m_now['repr_efficiency']:.1%}",
-              help="经过中介商品（Wool/Wheat/Iron）的交易量占比。越高 = 中介体系越成熟")
-
-with st.expander("📖 如何解读这四个指标", expanded=False):
-    st.markdown(
-        "- **健康市场**：Φ ≈ 0.6–0.8 · 认知负荷 ≈ 2–4 · 学习速率 > 2 · 表征效率 > 60%\n"
-        "- **危机中的市场**：Φ 骤降 · 认知负荷飙升至 8+ · 学习速率 < 0.5 · 表征效率 < 30%\n"
-        "- **过热的市场**：Φ ≈ 0.95（完全连接但脆弱）· 认知负荷 > 7 · 表征效率 > 90%（过度金融化）"
-    )
-
-if st.checkbox("📊 显示智能指标历史趋势", key="show_metrics_trend"):
-    hist = st.session_state.get("metrics_history", [])
-    if len(hist) < 2:
-        st.caption("暂无足够数据 — 多跑几个 tick 后再来")
-    else:
-        st.line_chart(pd.DataFrame(hist).astype(float), x="tick")
-
-# --- 汇率/交易量热力图（改进点 3） ---
-st.markdown("---")
-heat_col, table_col = st.columns([1, 1])
-
-with heat_col:
-    st.subheader("🔥 市场热力图")
-    heat_mode = st.radio(
-        "指标",
-        ["汇率 rate", "交易量 volume", "偏离基准 deviation"],
-        horizontal=True,
-        key="heat_mode",
-    )
-
-    market = st.session_state.market
-    commodities = list(market.G.nodes())
-    n = len(commodities)
-    idx = {c: i for i, c in enumerate(commodities)}
-    matrix = np.full((n, n), np.nan)
-    for u, v, data in market.G.edges(data=True):
-        if heat_mode.startswith("汇率"):
-            val = data['rate']
-        elif heat_mode.startswith("交易量"):
-            val = data['volume'] if data['volume'] > 0 else np.nan
-        else:  # 偏离基准：log(当前汇率 / 基准汇率)，危机/交易冲击一眼可见
-            base = market.base_rates.get((u, v))
-            val = math.log(data['rate'] / base) if base else np.nan
-        matrix[idx[u], idx[v]] = val
-
-    masked = np.ma.masked_invalid(matrix)
-    finite = matrix[np.isfinite(matrix)]
-    fig_h, ax_h = plt.subplots(figsize=(6.5, 5.5))
-    if not len(finite):
-        st.caption("暂无数据（等待交易发生）")
-    if len(finite):
-        if heat_mode.startswith("偏离"):
-            m = max(abs(finite.min()), abs(finite.max()), 0.05)
-            norm = mcolors.TwoSlopeNorm(vmin=-m, vcenter=0.0, vmax=m)
-            cmap = "RdBu_r"  # 蓝=低于基准(危机/砸盘), 红=高于基准
-        else:
-            vmin, vmax = finite.min(), finite.max()
-            if vmin == vmax:
-                vmax = vmin * 1.1
-            norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
-            cmap = "YlOrRd"
-        im = ax_h.imshow(masked, cmap=cmap, norm=norm)
-        # 标注每个有效边的数值，空缺边（不存在）留灰
-        for i in range(n):
-            for j in range(n):
-                val = matrix[i, j]
-                if np.isnan(val):
-                    ax_h.text(j, i, "—", ha="center", va="center", color="lightgray")
-                else:
-                    if heat_mode.startswith("汇率"):
-                        txt = f"{val:.2f}"
-                    elif heat_mode.startswith("交易量"):
-                        txt = f"{val:,.0f}"
-                    else:
-                        txt = f"{val:+.2f}"
-                    # 深色格子用白字，浅色用黑字
-                    frac = (val - norm.vmin) / (norm.vmax - norm.vmin)
-                    color = "white" if frac > 0.55 else "black"
-                    ax_h.text(j, i, txt, ha="center", va="center",
-                              color=color, fontsize=10, fontweight="bold")
-        fig_h.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04,
-                       label="rate (log)" if heat_mode.startswith("汇率")
-                       else ("cumulative volume" if heat_mode.startswith("交易量") else "log(rate/base)"))
-    labels = commodities  # matplotlib 缺 emoji/CJK 字体，图内用纯英文避免豆腐块
-    ax_h.set_xticks(range(n), labels)
-    ax_h.set_yticks(range(n), labels)
-    ax_h.set_xlabel("buy (to)")
-    ax_h.set_ylabel("sell (from)")
-    ax_h.set_title("row = sell, col = buy")
-    st.pyplot(fig_h)
-
-with table_col:
-    st.subheader("🔁 边状态明细")
-    rows = []
-    for u, v, data in st.session_state.market.G.edges(data=True):
-        base = st.session_state.market.base_rates.get((u, v), data['rate'])
-        rows.append({
-            "边": f"{st.session_state.market.G.nodes[u]['emoji']} {u} → {st.session_state.market.G.nodes[v]['emoji']} {v}",
-            "汇率": round(data['rate'], 4),
-            "基准": round(base, 4),
-            "偏离%": round((data['rate'] / base - 1) * 100, 1),
-            "交易量": round(data['volume'], 1),
-        })
-    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
-
-# --- 回测/快照比较（改进点 5） ---
-st.markdown("---")
-st.subheader("🕘 回测快照比较")
-snapshots = load_snapshots()
-if not snapshots:
-    st.caption("暂无快照 — 在侧边栏点击「📸 保存当前快照」记录一次运行，或勾选「重置时自动保存快照」")
-else:
-    snap_col, meta_col = st.columns([2, 1])
-    with snap_col:
-        log_y = st.checkbox("Y 轴对数刻度", value=False)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        colors = plt.cm.tab10.colors
-        agent_names = list(snapshots[0]["history"].keys())
-        linestyles = ["-", "--", "-.", ":"]
-        for i, snap in enumerate(snapshots):
-            c = colors[i % len(colors)]
-            for j, aname in enumerate(agent_names):
-                caps = snap["history"].get(aname)
-                if not caps:
-                    continue
-                ax.plot(caps, color=c, linestyle=linestyles[j % len(linestyles)],
-                        linewidth=2, label=f"{snap['name']} · {aname}")
-        ax.set_xlabel("Time Step")
-        ax.set_ylabel("Capital")
-        if log_y:
-            ax.set_yscale("log")
-        ax.legend(loc="upper left", fontsize=8, ncol=2)
-        ax.grid(True, alpha=0.3)
-        st.pyplot(fig)
-    with meta_col:
-        rows = []
-        for snap in snapshots:
-            p = snap["params"]
-            agent_summary = "; ".join(
-                f"{n}: {c['target']}/{c['capital']}资本/风险{c['risk']:.2f}/量{c['volume_frac']:.0%}"
-                for n, c in p["agents"].items()
-            )
-            rows.append({
-                "快照": snap["name"],
-                "Tick": snap["tick"],
-                "阈值": p["profit_threshold"],
-                "危机%": round(p["crisis_prob"] * 100),
-                "恢复": p["recovery_rate"],
-                "Agent 配置": agent_summary,
-            })
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-        del_name = st.selectbox("删除快照", [""] + [s["name"] for s in snapshots],
-                                key="delete_snapshot_select")
-        if st.button("🗑️ 删除所选快照", disabled=not del_name):
-            delete_snapshot(del_name)
-            st.rerun()
-        if st.button("🧹 清空全部快照"):
-            for s in snapshots:
-                delete_snapshot(s["name"])
-            st.rerun()
-
-# --- 运行逻辑 ---
-auto_run = st.checkbox("▶️ 自动运行模拟", value=False)
-
+# --- Run logic ---
 if auto_run:
     engine = st.session_state.engine
     events = engine.step()
@@ -581,10 +546,274 @@ if auto_run:
     st.session_state.logs.extend([f"[Tick {st.session_state.tick}] {e}" for e in events])
     time.sleep(sim_speed)
     st.rerun()
-else:
-    if st.button("⏭️ 单步执行"):
-        engine = st.session_state.engine
-        events = engine.step()
-        st.session_state.tick += 1
-        st.session_state.logs.extend([f"[Tick {st.session_state.tick}] {e}" for e in events])
-        st.rerun()
+elif step_clicked:
+    engine = st.session_state.engine
+    events = engine.step()
+    st.session_state.tick += 1
+    st.session_state.logs.extend([f"[Tick {st.session_state.tick}] {e}" for e in events])
+    st.rerun()
+
+# ============================================================
+# ROW 1 — Capital chart + Event log (point 2: smaller, in one panel)
+# ============================================================
+row1_left, row1_right = st.columns([3, 1])
+
+with row1_left:
+    with st.container(border=True):
+        st.markdown("##### 📈 资本演化")
+        fig, ax = plt.subplots(figsize=(8, 3.5))
+        history = st.session_state.capital_history
+        for name, caps in history.items():
+            ax.plot(caps, label=name, linewidth=2)
+        for tick_num, edges in st.session_state.get('crisis_marks', []):
+            if tick_num < len(list(history.values())[0]):
+                ax.axvline(x=tick_num, color='red', linestyle='--', alpha=0.5, linewidth=1)
+        ax.set_xlabel("Tick", fontsize=9)
+        ax.set_ylabel("Capital", fontsize=9)
+        ax.legend(loc='upper left', fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.tick_params(labelsize=8)
+        st.pyplot(fig, width="stretch")
+
+with row1_right:
+    with st.container(border=True, height=280):
+        st.markdown("##### 📜 日志")
+        for log in reversed(st.session_state.logs[-15:]):
+            st.text(log)
+
+# ============================================================
+# ROW 2 — Intelligence metrics (4 metric cards, compact)
+# ============================================================
+with st.container(border=True):
+    st.markdown("##### 🧠 系统智能仪表盘")
+    m_now = compute_intelligence_metrics(st.session_state.market, st.session_state.tick)
+    mc = st.columns(4)
+    with mc[0]:
+        st.metric("Φ 整合信息量", m_now["phi"],
+                  help="移除任一节点后全局可达点对的衰减率")
+    with mc[1]:
+        cl = m_now["cognitive_load"]
+        st.metric("认知负荷", "—" if cl is None else cl,
+                  help="平均交换链长度（归一化 0–10）")
+    with mc[2]:
+        lr = m_now["learning_rate"]
+        st.metric("学习速率", "—" if lr is None else lr,
+                  help="距最近一次危机的 tick 数倒数")
+    with mc[3]:
+        st.metric("表征效率", f"{m_now['repr_efficiency']:.1%}",
+                  help="中介商品交易量占比")
+
+    show_trend = st.checkbox("显示历史趋势", key="show_metrics_trend")
+    if show_trend:
+        hist = st.session_state.get("metrics_history", [])
+        if len(hist) < 2:
+            st.caption("暂无足够数据")
+        else:
+            st.line_chart(pd.DataFrame(hist).astype(float), x="tick", height=180)
+
+# ============================================================
+# ROW 3 — Heatmap + Edge table (point 2: compact side-by-side)
+# ============================================================
+row3_left, row3_right = st.columns([3, 2])
+
+with row3_left:
+    with st.container(border=True):
+        st.markdown("##### 🔥 市场热力图")
+        heat_mode = st.radio("指标", ["汇率 rate", "交易量 volume", "偏离基准 deviation"],
+                             horizontal=True, key="heat_mode")
+        market = st.session_state.market
+        commodities = list(market.G.nodes())
+        n = len(commodities)
+        idx = {c: i for i, c in enumerate(commodities)}
+        matrix = np.full((n, n), np.nan)
+        for u, v, data in market.G.edges(data=True):
+            if heat_mode.startswith("汇率"):
+                val = data['rate']
+            elif heat_mode.startswith("交易量"):
+                val = data['volume'] if data['volume'] > 0 else np.nan
+            else:
+                base = market.base_rates.get((u, v))
+                val = math.log(data['rate'] / base) if base else np.nan
+            matrix[idx[u], idx[v]] = val
+        masked = np.ma.masked_invalid(matrix)
+        finite = matrix[np.isfinite(matrix)]
+        fig_h, ax_h = plt.subplots(figsize=(5.5, 4.5))
+        if len(finite):
+            if heat_mode.startswith("偏离"):
+                m = max(abs(finite.min()), abs(finite.max()), 0.05)
+                norm = mcolors.TwoSlopeNorm(vmin=-m, vcenter=0.0, vmax=m)
+                cmap = "RdBu_r"
+            else:
+                vmin, vmax = finite.min(), finite.max()
+                if vmin == vmax: vmax = vmin * 1.1
+                norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
+                cmap = "YlOrRd"
+            im = ax_h.imshow(masked, cmap=cmap, norm=norm)
+            for i in range(n):
+                for j in range(n):
+                    val = matrix[i, j]
+                    if np.isnan(val):
+                        ax_h.text(j, i, "—", ha="center", va="center", color="lightgray", fontsize=9)
+                    else:
+                        if heat_mode.startswith("汇率"): txt = f"{val:.2f}"
+                        elif heat_mode.startswith("交易量"): txt = f"{val:,.0f}"
+                        else: txt = f"{val:+.2f}"
+                        norm_range = norm.vmax - norm.vmin
+                        frac = (val - norm.vmin) / norm_range if norm_range > 0 else 0.5
+                        color = "white" if frac > 0.55 else "black"
+                        ax_h.text(j, i, txt, ha="center", va="center", color=color, fontsize=9, fontweight="bold")
+            fig_h.colorbar(im, ax=ax_h, fraction=0.046, pad=0.04,
+                           label="rate" if heat_mode.startswith("汇率")
+                           else ("volume" if heat_mode.startswith("交易量") else "log(rate/base)"))
+        else:
+            st.caption("暂无数据")
+        labels = commodities
+        ax_h.set_xticks(range(n), labels, fontsize=8)
+        ax_h.set_yticks(range(n), labels, fontsize=8)
+        ax_h.set_xlabel("buy (to)", fontsize=9)
+        ax_h.set_ylabel("sell (from)", fontsize=9)
+        ax_h.set_title("row = sell, col = buy", fontsize=9)
+        st.pyplot(fig_h, width="stretch")
+
+with row3_right:
+    with st.container(border=True):
+        st.markdown("##### 🔁 边状态")
+        rows = []
+        for u, v, data in st.session_state.market.G.edges(data=True):
+            base = st.session_state.market.base_rates.get((u, v), data['rate'])
+            rows.append({
+                "边": f"{st.session_state.market.G.nodes[u]['emoji']} {u}→{v}",
+                "汇率": round(data['rate'], 4),
+                "偏离%": round((data['rate'] / base - 1) * 100, 1),
+                "量": round(data['volume'], 1),
+            })
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+# ============================================================
+# ROW 4 — Snapshots + Export + Sharing (compact)
+# ============================================================
+with st.container(border=True):
+    st.markdown("##### 🕘 回测 & 📤 导出")
+    snap_row1, snap_row2 = st.columns([3, 2])
+
+    snapshots = load_snapshots()
+    with snap_row1:
+        if not snapshots:
+            st.caption("暂无快照 — 点击侧边栏 📸 按钮")
+        else:
+            log_y = st.checkbox("Y轴对数", value=False, key="snap_logy")
+            fig, ax = plt.subplots(figsize=(7, 3))
+            colors = plt.cm.tab10.colors
+            agent_names = list(snapshots[0]["history"].keys())
+            linestyles = ["-", "--", "-.", ":"]
+            for i, snap in enumerate(snapshots):
+                c = colors[i % len(colors)]
+                for j, aname in enumerate(agent_names):
+                    caps = snap["history"].get(aname)
+                    if caps:
+                        ax.plot(caps, color=c, linestyle=linestyles[j % len(linestyles)],
+                                linewidth=2, label=f"{snap['name']}·{aname}")
+            ax.set_xlabel("Tick", fontsize=9)
+            ax.set_ylabel("Capital", fontsize=9)
+            if log_y: ax.set_yscale("log")
+            ax.legend(loc="upper left", fontsize=7, ncol=2)
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(labelsize=8)
+            st.pyplot(fig, width="stretch")
+
+    with snap_row2:
+        # CSV exports
+        hist_df = pd.DataFrame(st.session_state.capital_history)
+        hist_df.index.name = "tick"
+        csv_data = hist_df.to_csv().encode("utf-8")
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button("📥 资本CSV", data=csv_data,
+                               file_name=f"capital_tick{st.session_state.tick}.csv", mime="text/csv",
+                               width="stretch")
+        with dl_col2:
+            if st.session_state.get("metrics_history"):
+                metrics_csv = pd.DataFrame(st.session_state.metrics_history).to_csv(index=False).encode("utf-8")
+                st.download_button("📥 指标CSV", data=metrics_csv,
+                                   file_name=f"metrics_tick{st.session_state.tick}.csv", mime="text/csv",
+                                   width="stretch")
+
+        # Scenario sharing
+        st.markdown("**🔗 场景共享**")
+        params = {
+            "crisis_prob": st.session_state.crisis_prob,
+            "profit_threshold": st.session_state.profit_threshold,
+            "recovery_rate": st.session_state.recovery_rate,
+            "trading_tax": st.session_state.get("trading_tax", 0.0),
+        }
+        encoded = urllib.parse.urlencode({k: str(v) for k, v in params.items()})
+        st.code(f"?{encoded}", language="text")
+
+        # URL load
+        query_params = st.query_params
+        if query_params and not st.session_state.get("url_loaded", False):
+            try:
+                for k in ["crisis_prob", "profit_threshold", "recovery_rate", "trading_tax"]:
+                    if k in query_params:
+                        st.session_state[k] = float(query_params[k])
+                st.session_state.url_loaded = True
+                st.session_state.logs.append("[场景] 从 URL 加载了参数")
+            except (ValueError, TypeError):
+                pass
+
+        # Snapshot delete
+        if snapshots:
+            del_name = st.selectbox("删除快照", [""] + [s["name"] for s in snapshots], key="del_snap")
+            if st.button("🗑️ 删除", disabled=not del_name, width="stretch"):
+                delete_snapshot(del_name)
+                st.rerun()
+
+# ============================================================
+# TUTORIAL — How exchange works (point 6)
+# ============================================================
+with st.expander("🎓 教程：交换是如何完成的？", expanded=False):
+    tut_cols = st.columns(len(TUTORIAL_STEPS))
+    for i, (title, desc) in enumerate(TUTORIAL_STEPS):
+        with tut_cols[i]:
+            st.markdown(f"**{title}**")
+            st.caption(desc)
+    st.markdown("---")
+    st.markdown("**套利环示例：** 🐑 Sheep → 🧶 Wool → 🌾 Wheat → 🔨 Iron → 🍷 Wine → 🐑 Sheep")
+    st.markdown("汇率连乘: 5 × 2 × 0.05 × 0.5 × 10 = **2.5** > 阈值 1.05 → 套利！")
+
+# ============================================================
+# FLOATING BALL — Quick controls (point 1: 悬浮球按钮)
+# ============================================================
+float_html = """
+<div class="float-ball-wrapper">
+  <style>
+    .float-ball {{
+      width: 56px; height: 56px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      box-shadow: 0 4px 15px rgba(102,126,234,0.4);
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; transition: transform 0.2s;
+      font-size: 24px; color: white; user-select: none;
+    }}
+    .float-ball:hover {{ transform: scale(1.1); }}
+    .float-menu {{
+      display: none; position: absolute; bottom: 70px; right: 0;
+      flex-direction: column; gap: 8px;
+    }}
+    .float-menu.open {{ display: flex; }}
+    .float-menu button {{
+      padding: 10px 16px; border-radius: 24px; border: none;
+      background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      cursor: pointer; white-space: nowrap; font-size: 14px;
+    }}
+  </style>
+  <div class="float-menu" id="floatMenu">
+    <button onclick="window.parent.location.reload()">⏭️ 单步</button>
+    <button onclick="window.parent.document.querySelector('[data-testid=stSidebar]').scrollIntoView()">⚙️ 参数</button>
+    <button onclick="window.parent.scrollTo(0,0)">⬆️ 顶部</button>
+  </div>
+  <div class="float-ball" onclick="document.getElementById('floatMenu').classList.toggle('open')">⚙️</div>
+</div>
+"""
+st.iframe("data:text/html;charset=utf-8," + urllib.parse.quote(float_html), height=80)
